@@ -1,0 +1,265 @@
+services:
+  # ==========================================================================
+  # DATABASE - Starts First
+  # ==========================================================================
+  backend-database:
+    image: postgres:17.5
+    container_name: application-database
+    environment:
+      POSTGRES_USER: one211
+      POSTGRES_PASSWORD: one211
+      POSTGRES_DB: one211
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U one211 -d one211"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # BACKEND INSTANCES - Start After Database
+  # ==========================================================================
+  backend:
+    image: application-backend:latest
+    container_name: application-backend-1
+    depends_on:
+      backend-database:
+        condition: service_healthy
+    environment:
+      CORS_ALLOWED_ORIGINS: "https://frontend.one211.com,http://localhost:5173,http://localhost:5174,http://localhost:5175,https://www.one211.com,https://dazzleduck-ui.com,http://envoy:8000"
+      SPRING_DATASOURCE_URL: jdbc:postgresql://backend-database:5432/one211
+      SPRING_DATASOURCE_USERNAME: one211
+      SPRING_DATASOURCE_PASSWORD: one211
+      LOGGING_FORWARDING_ENABLED: "false"
+      METRICS_FORWARDING_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: >
+        --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  backend2:
+    image: application-backend:latest
+    container_name: application-backend-2
+    depends_on:
+      backend-database:
+        condition: service_healthy
+    environment:
+      CORS_ALLOWED_ORIGINS: "https://frontend.one211.com,http://localhost:5173,http://localhost:5174,http://localhost:5175,https://www.one211.com,https://dazzleduck-ui.com,http://envoy:8000"
+      SPRING_DATASOURCE_URL: jdbc:postgresql://backend-database:5432/one211
+      SPRING_DATASOURCE_USERNAME: one211
+      SPRING_DATASOURCE_PASSWORD: one211
+      LOGGING_FORWARDING_ENABLED: "false"
+      METRICS_FORWARDING_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: >
+        --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
+    ports:
+      - "8085:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # FRONTEND INSTANCES - Using wget for healthcheck (no curl in node image)
+  # ==========================================================================
+  frontend:
+    image: application-frontend:latest
+    container_name: application-frontend-1
+    ports:
+      - "5173:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5173/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  frontend2:
+    image: application-frontend:latest
+    container_name: application-frontend-2
+    ports:
+      - "5175:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5173/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # DAZZLEDUCK UI
+  # ==========================================================================
+  dazzleduck-ui:
+    image: dazzleduck-frontend:latest
+    container_name: dazzleduck-ui
+    ports:
+      - "5174:5174"
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # ENVOY - No dependency on frontends
+  # ==========================================================================
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    container_name: envoy-gateway
+    ports:
+      - "443:443"
+      - "9901:9901"
+      - "59307:59307"
+      - "59301:59301"
+      - "8000:8000"
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy/certs:/etc/envoy/certs:ro
+    command:
+      - -c
+      - /etc/envoy/envoy.yaml
+      - --log-level
+      - info
+    depends_on:
+      backend:
+        condition: service_healthy
+      backend2:
+        condition: service_healthy
+    networks:
+      - one211-network
+   
+
+  # ==========================================================================
+  # SQL CONTROLLERS
+  # ==========================================================================
+  sql-controller:
+    image: sql-controller:latest
+    container_name: sql-controller
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      JAVA_TOOL_OPTIONS: >
+        -Dobservability.enabled=false
+    command: >
+      controller
+      --conf flight_controller.flight.host=sql-controller
+      --conf flight_controller.flight.port=59307
+      --conf flight_controller.http.host=sql-controller
+      --conf flight_controller.http.port=9006
+      --conf 'flight_controller.login_url="http://envoy:8000/api/login"'
+      --conf flight_controller.access_mode=COMPLETE
+      --conf 'flight_controller.allow-origin="https://dazzleduck-ui.com"'
+    ports:
+      - "9006:9006"
+    volumes:
+      - ./warehouse:/workspace/warehouse/httpfs_cache
+    networks:
+      - one211-network
+
+  sql-controller2:
+    image: sql-controller:latest
+    container_name: sql-controller2
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      JAVA_TOOL_OPTIONS: >
+        -Dobservability.enabled=false
+    command: >
+      controller
+      --conf flight_controller.flight.host=sql-controller2
+      --conf flight_controller.flight.port=59301
+      --conf flight_controller.http.host=sql-controller2
+      --conf flight_controller.http.port=9007
+      --conf 'flight_controller.login_url="http://envoy:8000/api/login"'
+      --conf flight_controller.access_mode=COMPLETE
+      --conf 'flight_controller.allow-origin="https://dazzleduck-ui.com"'
+    ports:
+      - "9007:9007"
+    volumes:
+      - ./warehouse:/workspace/warehouse/httpfs_cache
+    networks:
+      - one211-network
+
+  # ==========================================================================
+  # MINIO
+  # ==========================================================================
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SERVER_URL: http://minio:9000
+    command: server /data --console-address ":9001"
+    networks:
+      - one211-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # SQL EXECUTOR
+  # ==========================================================================
+  sql-executor:
+    image: sql-controller:latest
+    container_name: sql-executor
+    depends_on:
+      - sql-controller
+      - sql-controller2
+      - envoy
+    environment:
+      JAVA_TOOL_OPTIONS: >
+        -Dobservability.enabled=false
+    command: >
+      executor
+      --conf flight_executor.cluster=new_cluster
+      --conf flight_executor.user=new_cluster
+      --conf flight_executor.password=123456
+      --conf flight_executor.secret_key=VGhpcyBpcyBhIDY0IGJpdCBsb25nIGtleSB3aGljaCBzaG91bGQgYmUgY2hhbmdlZCBpbiBwcm9kdWN0aW9uLiBTbyBjaGFuZ2UgbWUgYW5kIG1ha2Ugc3VyZSBpdHMgMTI4IGJpdCBsb25nIG9yIG1vcmU
+      --conf flight_executor.controllers.0.host=envoy
+      --conf flight_executor.controllers.0.port=59307
+      --conf flight_executor.controllers.1.host=envoy
+      --conf flight_executor.controllers.1.port=59301
+      --conf 'dazzleduck_server.startup_script_provider.content="SELECT 1"'
+    volumes:
+      - ./warehouse:/workspace/warehouse/httpfs_cache
+    networks:
+      - one211-network
+    restart: on-failure
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+networks:
+  one211-network:
+    driver: bridge
+
+volumes:
+  minio_data:
